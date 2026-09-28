@@ -1,0 +1,32 @@
+[project]
+name = "event-registration"
+version = "0.1.0"
+description = "Minimal asynchronous event registration service"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.16,<2",
+    "asyncpg>=0.30,<1",
+    "fastapi>=0.115,<1",
+    "itsdangerous>=2.2,<3",
+    "pydantic[email]>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = ["httpx>=0.28,<1", "pytest>=8.3,<9", "pytest-asyncio>=1.0,<2", "ruff>=0.11,<1"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "D103", "D102"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
