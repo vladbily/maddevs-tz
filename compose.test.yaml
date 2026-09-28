@@ -41,5 +41,19 @@ services:
       timeout: 5s
       retries: 20
 
+  browser:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.e2e
+    environment:
+      BASE_URL: http://frontend
+      ORGANIZER_PASSWORD: organizer-test
+    depends_on:
+      frontend:
+        condition: service_healthy
+    volumes:
+      - ./frontend/test-results:/app/test-results
+    ipc: host
+
 volumes:
   test_data:

@@ -19,8 +19,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-compose build backend frontend
+compose build backend frontend browser
 compose up -d --wait postgres
 compose run --rm backend sh -c \
   'uv run --no-sync ruff check . && uv run --no-sync ruff format --check . && uv run --no-sync alembic upgrade head && uv run --no-sync alembic check && uv run --no-sync pytest -q'
 compose up -d --wait backend frontend
+compose exec -T backend uv run --no-sync python -m tests.live_smoke
+compose restart backend
+compose up -d --wait backend frontend
+compose exec -T backend uv run --no-sync python -m tests.live_smoke --after-restart
+compose run --rm browser

@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "format:check": "prettier --check src e2e *.ts index.html",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -20,6 +21,7 @@
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.2",
+    "prettier": "^3.6.2",
     "typescript": "^5.9.2",
     "vite": "^7.1.3"
   }
