@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: events
+      POSTGRES_PASSWORD: events
+      POSTGRES_DB: events_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U events -d events_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - test_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://events:events@postgres:5432/events_test
+      TEST_DATABASE_URL: postgresql+asyncpg://events:events@postgres:5432/events_test
+      ORGANIZER_PASSWORD: organizer-test
+      SESSION_SECRET: isolated-test-session-secret
+      REMINDER_INTERVAL: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "uv", "run", "--no-sync", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/api/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  test_data:
