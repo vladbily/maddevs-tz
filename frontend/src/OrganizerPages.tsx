@@ -12,10 +12,10 @@ import {
   api,
   errorMessage,
   formatDate,
+  publicUrl,
   toLocalInput,
   type Event,
   type Participant,
-  type Statistics,
 } from "./api";
 import { Counters, EventCard, Loading, Notice, Status } from "./components";
 import { useResource } from "./hooks";
@@ -139,9 +139,9 @@ export function LoginPage() {
           </button>
         </form>
         {error && <Notice>{error}</Notice>}
-        <Link className="back-link" to="/">
+        <a className="back-link" href={publicUrl("/")}>
           ← Вернуться к событиям
-        </Link>
+        </a>
       </section>
     </div>
   );
@@ -153,11 +153,11 @@ export function OrganizerPage() {
   const [logoutError, setLogoutError] = useState("");
   const navigate = useNavigate();
 
-  /** Clear the session and return to the public event list. */
+  /** Clear the session and return to the private login page. */
   async function logout() {
     try {
       await api("/auth/logout", { method: "POST" });
-      navigate("/", { replace: true });
+      navigate("/login", { replace: true });
     } catch (failure) {
       setLogoutError(errorMessage(failure));
     }
@@ -239,6 +239,7 @@ function EventForm({ initial }: { initial?: Event }) {
                 ? initial.starts_at
                 : new Date(date).toISOString(),
             capacity: Number(capacity),
+            ...(initial ? { revision: initial.revision } : {}),
           }),
         },
       );
@@ -382,13 +383,18 @@ export function EditEventPage() {
 /** Manage attendance with live counters, a participant list, and manual ticket entry. */
 export function DashboardPage() {
   const { id } = useParams();
-  const { data: event, loading, error } = useResource<Event>(`/events/${id}`);
+  const {
+    data: initialEvent,
+    loading,
+    error,
+  } = useResource<Event>(`/events/${id}`);
   const {
     data: participants,
     error: participantsError,
     reload,
   } = useResource<Participant[]>(`/organizer/events/${id}/participants`);
-  const [stats, setStats] = useState<Statistics | null>(null);
+  const [snapshot, setSnapshot] = useState<Event | null>(null);
+  const event = snapshot?.id === Number(id) ? snapshot : initialEvent;
   const [connected, setConnected] = useState(false);
   const [code, setCode] = useState("");
   const [feedback, setFeedback] = useState("");
@@ -401,10 +407,13 @@ export function DashboardPage() {
   useEffect(
     function connectStream() {
       let active = true;
+      setSnapshot(null);
+      setConnected(false);
       const stream = new EventSource(`/api/organizer/events/${id}/stream`);
       /** Apply a changed server snapshot and refresh the participant rows. */
       stream.onmessage = function receive(message) {
-        setStats(JSON.parse(message.data) as Statistics);
+        if (!active) return;
+        setSnapshot(JSON.parse(message.data) as Event);
         setConnected(true);
         reload();
       };
@@ -465,9 +474,7 @@ export function DashboardPage() {
   /** Copy the public event link for sharing with prospective participants. */
   async function copyEvent() {
     try {
-      await navigator.clipboard.writeText(
-        `${window.location.origin}/events/${id}`,
-      );
+      await navigator.clipboard.writeText(publicUrl(`/events/${id}`));
       setCopied(true);
     } catch {
       setSuccess(false);
@@ -476,8 +483,8 @@ export function DashboardPage() {
       );
     }
   }
-  if (loading) return <Loading />;
-  if (!event || error) return <Notice>{error || "Событие не найдено"}</Notice>;
+  if (loading && !event) return <Loading />;
+  if (!event) return <Notice>{error || "Событие не найдено"}</Notice>;
   return (
     <>
       <Link className="back-link" to="/organizer">
@@ -501,15 +508,15 @@ export function DashboardPage() {
             : "Подключение к live-статистике…"}
         </div>
         <div className="button-row">
-          <Link className="text-button" to={`/events/${id}`}>
+          <a className="text-button" href={publicUrl(`/events/${id}`)}>
             Страница события ↗
-          </Link>
+          </a>
           <button className="text-button" onClick={copyEvent}>
             {copied ? "Скопировано ✓" : "Копировать ссылку"}
           </button>
         </div>
       </div>
-      <Counters stats={stats ?? event} capacity={event.capacity} />
+      <Counters stats={event} capacity={event.capacity} />
       <div className="dashboard-content">
         <section className="participants-panel">
           <div className="section-heading">
@@ -519,7 +526,17 @@ export function DashboardPage() {
             </div>
             <span className="count-pill">{participants?.length ?? 0}</span>
           </div>
-          {participantsError && <Notice>{participantsError}</Notice>}
+          {participantsError && (
+            <>
+              <Notice>
+                {participantsError}
+                {participants && " Список участников может быть устаревшим."}
+              </Notice>
+              <button className="button secondary" onClick={reload}>
+                Повторить
+              </button>
+            </>
+          )}
           {participants?.length === 0 ? (
             <div className="small-empty">
               <p>Пока никто не зарегистрировался.</p>

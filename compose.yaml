@@ -17,8 +17,8 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgresql+asyncpg://events:events@postgres:5432/events
-      ORGANIZER_PASSWORD: ${ORGANIZER_PASSWORD:-organizer-local}
-      SESSION_SECRET: ${SESSION_SECRET:-local-development-session-secret-change-me}
+      ORGANIZER_PASSWORD: ${ORGANIZER_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     depends_on:
       postgres:
@@ -30,9 +30,13 @@ services:
       retries: 30
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        PUBLIC_URL: ${PUBLIC_URL:-http://localhost:${APP_PORT:-8080}}
     ports:
       - "127.0.0.1:${APP_PORT:-8080}:80"
+      - "127.0.0.1:${ORGANIZER_PORT:-8081}:8081"
     depends_on:
       backend:
         condition: service_healthy

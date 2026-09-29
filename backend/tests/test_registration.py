@@ -13,7 +13,7 @@ from app.database import session_factory
 from app.main import app
 from app.models import Event, Notification, Registration
 from app.reminders import run_reminders
-from app.schemas import EventInput
+from app.schemas import EventUpdate
 
 
 async def create_event(client: AsyncClient, capacity: int = 1, hours: int = 48) -> dict:
@@ -185,20 +185,23 @@ async def test_reminder_reschedule_and_late_promotion(organizer: AsyncClient) ->
     a = await register(organizer, event["id"], "a@example.com")
     await register(organizer, event["id"], "b@example.com")
     event["starts_at"] = (datetime.now(UTC) + timedelta(days=3)).isoformat()
-    assert (
-        await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
-    ).status_code == 200
+    response = await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+    assert response.status_code == 200
+    event = response.json()
     await run_reminders()
     assert len(await notifications("reminder")) == 0
     event["starts_at"] = (datetime.now(UTC) + timedelta(hours=10)).isoformat()
-    await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+    response = await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+    assert response.status_code == 200
+    event = response.json()
     await run_reminders()
     assert len(await notifications("reminder")) == 1
     await organizer.post(f"/api{a['manage_url']}/cancel")
     await run_reminders()
     assert len(await notifications("reminder")) == 2
     event["starts_at"] = (datetime.now(UTC) + timedelta(hours=20)).isoformat()
-    await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+    response = await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+    assert response.status_code == 200
     await run_reminders()
     assert len(await notifications("reminder")) == 2
 
@@ -227,9 +230,9 @@ async def test_reschedule_notifications(organizer: AsyncClient) -> None:
     original_date = event["starts_at"]
     event["starts_at"] = (datetime.now(UTC) + timedelta(days=4)).isoformat()
     for _ in range(2):
-        assert (
-            await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
-        ).status_code == 200
+        response = await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+        assert response.status_code == 200
+        event = response.json()
     messages = await notifications("reschedule")
     assert sorted(message.email for message in messages) == ["a@example.com", "b@example.com"]
     assert datetime.fromisoformat(messages[0].payload["starts_at"]) == datetime.fromisoformat(
@@ -237,7 +240,8 @@ async def test_reschedule_notifications(organizer: AsyncClient) -> None:
     )
     assert next(message for message in messages if message.email == "b@example.com").code is None
     event["starts_at"] = original_date
-    await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+    response = await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+    assert response.status_code == 200
     assert len(await notifications("reschedule")) == 4
 
 
@@ -247,9 +251,9 @@ async def test_capacity_and_validation(organizer: AsyncClient) -> None:
     await register(organizer, event["id"], "a@example.com")
     b = await register(organizer, event["id"], "b@example.com")
     event["capacity"] = 2
-    assert (
-        await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
-    ).status_code == 200
+    response = await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
+    assert response.status_code == 200
+    event = response.json()
     assert (await ticket(organizer, b))["status"] == "confirmed"
     event["capacity"] = 1
     assert (
@@ -293,7 +297,7 @@ async def test_rollbacks_restore_promotion_and_schedule(
         await organizer.post(f"/api{a['manage_url']}/cancel")
     assert (await ticket(organizer, a))["status"] == "confirmed"
     assert (await ticket(organizer, b))["status"] == "waitlisted"
-    data = EventInput.model_validate({**event, "starts_at": datetime.now(UTC) + timedelta(days=5)})
+    data = EventUpdate.model_validate({**event, "starts_at": datetime.now(UTC) + timedelta(days=5)})
     with pytest.raises(RuntimeError):
         async with session_factory() as session:
             await services.update_event(session, event["id"], data)

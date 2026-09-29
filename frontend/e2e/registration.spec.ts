@@ -1,5 +1,95 @@
 import { test, expect, type Page } from "@playwright/test";
 
+/** Keep organizer screens and APIs unreachable from the public listener. */
+test("public site has no organizer entry or private API", async function isolation({
+  page,
+}) {
+  const publicURL = process.env.PUBLIC_BASE_URL ?? "http://localhost:8080";
+  await page.goto(publicURL);
+  await expect(page.getByRole("navigation")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /Организатору|Кабинет/ }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('a[href*="/organizer"], a[href*="/login"]'),
+  ).toHaveCount(0);
+  const login = await page.request.post("/api/auth/login", {
+    data: {
+      password: process.env.ORGANIZER_PASSWORD ?? "organizer-test-password",
+    },
+  });
+  expect(login.status()).toBe(200);
+  for (const path of [
+    "/login",
+    "/organizer",
+    "/organizer/new",
+    "/api/auth/session",
+    "/api/organizer/events/1/participants",
+    "/api/organizer/events/1/stream",
+    "/api/docs",
+    "/api/openapi.json",
+    "/api/%61uth/session",
+  ]) {
+    const response = await page.request.get(`${publicURL}${path}`);
+    expect(response.status(), path).toBe(404);
+  }
+  for (const path of ["/api/auth/login", "/api/organizer/events"]) {
+    const response = await page.request.post(`${publicURL}${path}`, {
+      headers: { Host: "organizer.example.com" },
+      data: {
+        password: process.env.ORGANIZER_PASSWORD ?? "organizer-test-password",
+      },
+    });
+    expect(response.status(), path).toBe(404);
+  }
+  const session = await page.request.get("/api/auth/session");
+  expect(session.status()).toBe(200);
+  const logout = await page.request.post("/api/auth/logout", {
+    headers: { Origin: publicURL },
+  });
+  expect(logout.status()).toBe(403);
+  expect((await page.request.get("/api/auth/session")).status()).toBe(200);
+});
+
+/** Keep the empty landing page focused on participants without a private entry. */
+test("empty public landing has no organizer links", async function emptyLanding({
+  page,
+}) {
+  await page.route(
+    "**/api/events",
+    /** Return an empty event list without modifying the isolated database. */
+    async function noEvents(route) {
+      await route.fulfill({ json: [] });
+    },
+  );
+  await page.goto(process.env.PUBLIC_BASE_URL ?? "http://localhost:8080");
+  await expect(
+    page.getByRole("heading", { name: "Здесь скоро появятся встречи" }),
+  ).toBeVisible();
+  await expect(
+    page.locator('a[href*="/organizer"], a[href*="/login"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: /Создать событие|Организатору|Кабинет/ }),
+  ).toHaveCount(0);
+});
+
+/** Keep failed login and logout feedback usable on the private listener. */
+test("private login errors and logout", async function privateLogin({ page }) {
+  await page.goto("/organizer");
+  await page.getByLabel("Пароль", { exact: true }).fill("wrong-password");
+  await page.getByRole("button", { name: "Войти →" }).click();
+  await expect(page.getByRole("alert")).toContainText("Неверный пароль");
+  await page
+    .getByLabel("Пароль", { exact: true })
+    .fill(process.env.ORGANIZER_PASSWORD ?? "organizer-test-password");
+  await page.getByRole("button", { name: "Войти →" }).click();
+  await expect(page).toHaveURL(/\/organizer$/);
+  await page.getByRole("button", { name: "Выйти", exact: true }).click();
+  await expect(page).toHaveURL(/\/login$/);
+  expect((await page.request.get("/api/auth/session")).status()).toBe(401);
+});
+
 /** Fill the public registration form and wait for a private ticket page. */
 async function register(page: Page, eventId: string, email: string) {
   await page.goto(`/events/${eventId}`);
@@ -15,7 +105,7 @@ test("FIFO promotion, check-in, live counters and rescheduling", async function 
   page,
   browser,
 }) {
-  const baseURL = process.env.BASE_URL ?? "http://localhost:8080";
+  const baseURL = process.env.PUBLIC_BASE_URL ?? "http://localhost:8080";
   const errors: string[] = [];
   /** Record uncaught browser errors for the acceptance check. */
   page.on("pageerror", function record(error) {
@@ -24,7 +114,7 @@ test("FIFO promotion, check-in, live counters and rescheduling", async function 
   await page.goto("/organizer");
   await page
     .getByLabel("Пароль", { exact: true })
-    .fill(process.env.ORGANIZER_PASSWORD ?? "organizer-test");
+    .fill(process.env.ORGANIZER_PASSWORD ?? "organizer-test-password");
   await page.getByRole("button", { name: "Войти →" }).click();
   await page
     .getByRole("link", { name: /Создать событие/ })
@@ -41,6 +131,27 @@ test("FIFO promotion, check-in, live counters and rescheduling", async function 
   await page.getByRole("button", { name: "Создать событие ↗" }).click();
   await expect(page).toHaveURL(/\/organizer\/events\/\d+$/);
   const eventId = page.url().split("/").at(-1)!;
+  const publicEventURL = `${baseURL}/events/${eventId}`;
+  await expect(
+    page.getByRole("link", { name: "Страница события ↗" }),
+  ).toHaveAttribute("href", publicEventURL);
+  /** Capture copied text on the isolated HTTP origin where Clipboard API may be unavailable. */
+  await page.evaluate(function captureClipboard() {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        /** Record the exact invitation produced by the dashboard handler. */
+        async writeText(value: string) {
+          document.body.dataset.copiedEventUrl = value;
+        },
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Копировать ссылку" }).click();
+  await expect(page.locator("body")).toHaveAttribute(
+    "data-copied-event-url",
+    publicEventURL,
+  );
   const monitor = await page.context().newPage();
   await monitor.goto(`/organizer/events/${eventId}`);
   await expect(monitor.getByTestId("checked-in-count")).toHaveText("0");
@@ -87,7 +198,7 @@ test("FIFO promotion, check-in, live counters and rescheduling", async function 
   expect(
     new Date((await updated.json()).starts_at).toISOString().slice(0, 16),
   ).toBe(newDate);
-  await page.goto("/");
+  await page.goto(baseURL);
   await expect(page.getByRole("heading", { name })).toBeVisible();
   await page.screenshot({
     path: "test-results/events-desktop.png",
@@ -115,7 +226,7 @@ test("missing organizer session returns to login", async function expiredSession
   page,
   context,
 }) {
-  const password = process.env.ORGANIZER_PASSWORD ?? "organizer-test";
+  const password = process.env.ORGANIZER_PASSWORD ?? "organizer-test-password";
   await page.request.post("/api/auth/login", { data: { password } });
   await page.goto("/organizer");
   await expect(
@@ -147,7 +258,9 @@ test("editing a description does not reschedule the event", async function uncha
   page,
 }) {
   await page.request.post("/api/auth/login", {
-    data: { password: process.env.ORGANIZER_PASSWORD ?? "organizer-test" },
+    data: {
+      password: process.env.ORGANIZER_PASSWORD ?? "organizer-test-password",
+    },
   });
   const startsAt = new Date(Date.now() + 72 * 3_600_000).toISOString();
   const response = await page.request.post("/api/organizer/events", {
@@ -169,6 +282,6 @@ test("editing a description does not reschedule the event", async function uncha
   const result = await (
     await page.request.get(`/api/events/${event.id}`)
   ).json();
-  expect(result.revision).toBe(event.revision);
+  expect(result.revision).toBe(event.revision + 1);
   expect(new Date(result.starts_at).toISOString()).toBe(startsAt);
 });

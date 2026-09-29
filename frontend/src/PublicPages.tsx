@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   api,
@@ -9,7 +9,39 @@ import {
   type Ticket,
 } from "./api";
 import { DateTile, EventCard, Loading, Notice, Status } from "./components";
-import { useResource } from "./hooks";
+import { useHasStarted, useResource } from "./hooks";
+
+/** Persist an unguessable retry key before a registration can reach the server. */
+function registrationKey(storageKey: string): string {
+  const saved = sessionStorage.getItem(storageKey);
+  if (saved) return saved;
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(
+    bytes,
+    /** Encode each random byte. */ function encode(byte) {
+      return byte.toString(16).padStart(2, "0");
+    },
+  ).join("");
+  const key = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  sessionStorage.setItem(storageKey, key);
+  return key;
+}
+
+/** Find an unfinished request so its owner can recover a ticket even after event start. */
+function pendingEmail(eventId: string): string {
+  const prefix = `registration:${eventId}:`;
+  try {
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith(prefix)) return key.slice(prefix.length);
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
 
 /** Show upcoming events and a welcoming empty state on a new installation. */
 export function EventsPage() {
@@ -98,13 +130,10 @@ export function EventsPage() {
             </span>
             <h3>Здесь скоро появятся встречи</h3>
             <p>
-              Хорошему событию нужен только повод.
+              Мы готовим новые события.
               <br />
-              Создайте первое — и пригласите участников.
+              Загляните позже, чтобы выбрать свою встречу.
             </p>
-            <Link className="button secondary" to="/organizer">
-              Создать событие
-            </Link>
           </div>
         )}
         <div className="event-grid">
@@ -141,24 +170,43 @@ export function EventsPage() {
 /** Show an event and register a participant using only an email address. */
 export function EventPage() {
   const { id } = useParams();
-  const { data: event, loading, error } = useResource<Event>(`/events/${id}`);
-  const [email, setEmail] = useState("");
+  const {
+    data: event,
+    loading,
+    error,
+    reload,
+  } = useResource<Event>(`/events/${id}`, 3000);
+  const past = useHasStarted(event?.starts_at);
+  const [email, setEmail] = useState(pendingEmail(id ?? ""));
+  const canRecover = Boolean(pendingEmail(id ?? ""));
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [duplicate, setDuplicate] = useState(false);
   const navigate = useNavigate();
 
-  /** Submit one registration and open only a newly issued management link. */
+  /** Submit a new registration or securely recover the same request's management link. */
   async function submit(form: FormEvent) {
     form.preventDefault();
     setBusy(true);
     setFeedback("");
     setDuplicate(false);
     try {
+      const storageKey = `registration:${id}:${email.trim().toLowerCase()}`;
+      const idempotencyKey = past
+        ? sessionStorage.getItem(storageKey)
+        : registrationKey(storageKey);
+      if (!idempotencyKey)
+        throw new Error(
+          "Укажите email незавершённой регистрации для восстановления билета.",
+        );
       const result = await api<RegistrationResult>(
         `/events/${id}/registrations`,
-        { method: "POST", body: JSON.stringify({ email }) },
+        {
+          method: "POST",
+          body: JSON.stringify({ email, idempotency_key: idempotencyKey }),
+        },
       );
+      sessionStorage.removeItem(storageKey);
       if (result.manage_url) navigate(result.manage_url);
       else {
         setDuplicate(true);
@@ -173,14 +221,29 @@ export function EventPage() {
     }
   }
   if (loading) return <Loading />;
-  if (error || !event) return <Notice>{error || "Событие не найдено"}</Notice>;
-  const past = new Date(event.starts_at).getTime() <= Date.now();
+  if (!event)
+    return (
+      <>
+        <Notice>{error || "Событие не найдено"}</Notice>
+        <button className="button secondary" onClick={reload}>
+          Повторить
+        </button>
+      </>
+    );
   const available = Math.max(event.capacity - event.confirmed, 0);
   return (
     <>
       <Link className="back-link" to="/">
         ← Все события
       </Link>
+      {error && (
+        <>
+          <Notice>{error} Показаны последние полученные данные.</Notice>
+          <button className="button secondary" onClick={reload}>
+            Повторить
+          </button>
+        </>
+      )}
       <div className="detail-layout">
         <article className="event-detail">
           <p className="eyebrow">ХОРОШИЙ ПОВОД ВСТРЕТИТЬСЯ</p>
@@ -225,8 +288,14 @@ export function EventPage() {
               }}
             />
           </div>
-          {!past && (
+          {(!past || canRecover) && (
             <form onSubmit={submit}>
+              {past && (
+                <p>
+                  Повторите незавершённый запрос с тем же email, чтобы
+                  восстановить билет.
+                </p>
+              )}
               <label htmlFor="participant-email">Ваш email</label>
               <input
                 id="participant-email"
@@ -247,9 +316,11 @@ export function EventPage() {
               <button className="button full-width" disabled={busy}>
                 {busy
                   ? "Сохраняем…"
-                  : available
-                    ? "Зарегистрироваться ↗"
-                    : "Встать в лист ожидания ↗"}
+                  : past
+                    ? "Восстановить билет ↗"
+                    : available
+                      ? "Зарегистрироваться ↗"
+                      : "Встать в лист ожидания ↗"}
               </button>
               <p className="form-note">
                 Планы поменялись? Отменить участие можно по ссылке на вашу
@@ -272,23 +343,12 @@ export function TicketPage() {
     error,
     loading,
     reload,
-  } = useResource<Ticket>(`/tickets/${token}`);
+  } = useResource<Ticket>(`/tickets/${token}`, 3000);
+  const past = useHasStarted(ticket?.event.starts_at);
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
-
-  /** Refresh the ticket so a promoted waiter receives their new code automatically. */
-  useEffect(
-    function pollTicket() {
-      const timer = window.setInterval(reload, 3000);
-      /** Release polling when leaving the private ticket screen. */
-      return function stopPolling() {
-        window.clearInterval(timer);
-      };
-    },
-    [reload],
-  );
 
   /** Cancel after an explicit confirmation in the ticket screen. */
   async function cancel() {
@@ -315,12 +375,17 @@ export function TicketPage() {
     }
   }
   if (loading) return <Loading />;
-  if (!ticket) return <Notice>{error || "Регистрация не найдена"}</Notice>;
+  if (!ticket)
+    return (
+      <>
+        <Notice>{error || "Регистрация не найдена"}</Notice>
+        <button className="button secondary" onClick={reload}>
+          Повторить
+        </button>
+      </>
+    );
   const active = ticket.status !== "cancelled";
-  const canCancel =
-    active &&
-    !ticket.checked_in_at &&
-    new Date(ticket.event.starts_at).getTime() > Date.now();
+  const canCancel = active && !ticket.checked_in_at && !past;
   return (
     <>
       <Link className="back-link" to="/">
@@ -391,7 +456,15 @@ export function TicketPage() {
             </p>
           </>
         )}
-        {(feedback || error) && <Notice>{feedback || error}</Notice>}
+        {feedback && <Notice>{feedback}</Notice>}
+        {error && (
+          <>
+            <Notice>{error} Показаны последние полученные данные.</Notice>
+            <button className="button secondary" onClick={reload}>
+              Повторить
+            </button>
+          </>
+        )}
         {canCancel && (
           <div className="cancel-area">
             {confirmCancel ? (

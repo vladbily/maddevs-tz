@@ -2,14 +2,16 @@
 
 import secrets
 from datetime import UTC, datetime
+from hashlib import sha256
+from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Event, Notification, Registration
-from app.schemas import EventInput, EventOut, RegistrationResult, Statistics, TicketOut
+from app.models import Event, Notification, Registration, RegistrationRequest
+from app.schemas import EventInput, EventOut, EventUpdate, RegistrationResult, Statistics, TicketOut
 
 
 def utcnow() -> datetime:
@@ -49,17 +51,31 @@ async def statistics(session: AsyncSession, event_id: int) -> Statistics:
 
 
 async def event_out(session: AsyncSession, event: Event) -> EventOut:
-    """Combine event information and current registration totals."""
-    counts = await statistics(session, event.id)
-    return EventOut(
-        id=event.id,
-        title=event.title,
-        description=event.description,
-        starts_at=event.starts_at,
-        capacity=event.capacity,
-        revision=event.revision,
-        **counts.model_dump(),
+    """Read event details, versions, and counts in one database snapshot."""
+    row = (
+        (
+            await session.execute(
+                select(
+                    *Event.__table__.columns,
+                    func.count(Registration.id)
+                    .filter(Registration.status == "confirmed")
+                    .label("confirmed"),
+                    func.count(Registration.id)
+                    .filter(Registration.status == "waitlisted")
+                    .label("waitlisted"),
+                    func.count(Registration.id)
+                    .filter(Registration.checked_in_at.is_not(None))
+                    .label("checked_in"),
+                )
+                .outerjoin(Registration, Registration.event_id == Event.id)
+                .where(Event.id == event.id)
+                .group_by(Event.id)
+            )
+        )
+        .mappings()
+        .one()
     )
+    return EventOut(**row)
 
 
 async def notify(
@@ -107,6 +123,7 @@ async def promote_waitlist(session: AsyncSession, event: Event) -> None:
     for registration in waiting:
         registration.status = "confirmed"
         registration.ticket_code = secrets.token_hex(8).upper()
+        event.participants_revision += 1
         await session.flush()
         await notify(
             session,
@@ -128,10 +145,18 @@ async def create_event(session: AsyncSession, data: EventInput) -> EventOut:
     return result
 
 
-async def update_event(session: AsyncSession, event_id: int, data: EventInput) -> EventOut:
+async def update_event(session: AsyncSession, event_id: int, data: EventUpdate) -> EventOut:
     """Update an event and record date changes for active participants."""
     async with session.begin():
         event = await get_event(session, event_id, lock=True)
+        if data.revision != event.revision:
+            raise HTTPException(
+                409, "Событие изменено в другой вкладке. Обновите страницу и повторите правки."
+            )
+        changed = any(
+            getattr(event, field) != getattr(data, field)
+            for field in ("title", "description", "starts_at", "capacity")
+        )
         changed_date = event.starts_at != data.starts_at
         if changed_date:
             require_future(data.starts_at)
@@ -144,7 +169,7 @@ async def update_event(session: AsyncSession, event_id: int, data: EventInput) -
         event.description = data.description
         event.starts_at = data.starts_at
         event.capacity = data.capacity
-        if changed_date:
+        if changed:
             event.revision += 1
         await session.flush()
         if event.starts_at > utcnow():
@@ -168,10 +193,27 @@ async def update_event(session: AsyncSession, event_id: int, data: EventInput) -
     return result
 
 
-async def register(session: AsyncSession, event_id: int, email: str) -> RegistrationResult:
+async def register(
+    session: AsyncSession, event_id: int, email: str, idempotency_key: UUID | None = None
+) -> RegistrationResult:
     """Reserve one place or append to the waiting list without duplicates."""
     async with session.begin():
         event = await get_event(session, event_id, lock=True)
+        key_hash = sha256(str(idempotency_key).encode()).hexdigest() if idempotency_key else None
+        if key_hash:
+            request = await session.get(RegistrationRequest, (event_id, key_hash))
+            if request is not None:
+                previous = await session.get(Registration, request.registration_id)
+                assert previous is not None
+                if previous.email != email:
+                    raise HTTPException(409, "Повтор запроса должен использовать тот же email")
+                if previous.manage_token != request.manage_token:
+                    raise HTTPException(409, "Этот запрос относится к отменённой регистрации")
+                return RegistrationResult(
+                    status=previous.status,
+                    created=False,
+                    manage_url=f"/tickets/{previous.manage_token}",
+                )
         require_future(event.starts_at)
         registration = await session.scalar(
             select(Registration).where(
@@ -188,7 +230,17 @@ async def register(session: AsyncSession, event_id: int, email: str) -> Registra
         registration.ticket_code = None
         registration.checked_in_at = None
         registration.manage_token = secrets.token_urlsafe(32)
+        event.participants_revision += 1
         await session.flush()
+        if key_hash:
+            session.add(
+                RegistrationRequest(
+                    event_id=event_id,
+                    key_hash=key_hash,
+                    registration_id=registration.id,
+                    manage_token=registration.manage_token,
+                )
+            )
         await promote_waitlist(session, event)
         if registration.status == "waitlisted":
             await notify(
@@ -246,6 +298,7 @@ async def cancel(session: AsyncSession, token: str) -> dict[str, str]:
             raise HTTPException(409, "Нельзя отменить участие после чекина")
         registration.status = "cancelled"
         registration.ticket_code = None
+        event.participants_revision += 1
         await session.flush()
         await promote_waitlist(session, event)
     return {"status": "cancelled"}
@@ -254,7 +307,7 @@ async def cancel(session: AsyncSession, token: str) -> dict[str, str]:
 async def checkin(session: AsyncSession, event_id: int, code: str) -> dict[str, str]:
     """Mark a valid ticket exactly once under the event lock."""
     async with session.begin():
-        await get_event(session, event_id, lock=True)
+        event = await get_event(session, event_id, lock=True)
         registration = await session.scalar(
             select(Registration).where(
                 Registration.event_id == event_id,
@@ -267,5 +320,6 @@ async def checkin(session: AsyncSession, event_id: int, code: str) -> dict[str, 
         if registration.checked_in_at is not None:
             raise HTTPException(409, "Билет уже использован")
         registration.checked_in_at = utcnow()
+        event.participants_revision += 1
         email = registration.email
     return {"status": "checked_in", "email": email}

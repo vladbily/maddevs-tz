@@ -10,6 +10,20 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
+class OrganizerLogin(Base):
+    """Persist the single organizer's failed attempts across backend restarts."""
+
+    __tablename__ = "organizer_login"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="single_organizer_login"),
+        CheckConstraint("failed_attempts >= 0", name="nonnegative_login_failures"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    failed_attempts: Mapped[int] = mapped_column(default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Event(Base):
     """An event with a fixed number of available places."""
 
@@ -22,6 +36,7 @@ class Event(Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     capacity: Mapped[int]
     revision: Mapped[int] = mapped_column(default=1)
+    participants_revision: Mapped[int] = mapped_column(default=0)
 
 
 class Registration(Base):
@@ -47,6 +62,17 @@ class Registration(Base):
     ticket_code: Mapped[str | None] = mapped_column(String(32), unique=True)
     manage_token: Mapped[str] = mapped_column(String(64), unique=True)
     checked_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RegistrationRequest(Base):
+    """Remember request keys across cancellation and replacement registrations."""
+
+    __tablename__ = "registration_requests"
+
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), primary_key=True)
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    registration_id: Mapped[int] = mapped_column(ForeignKey("registrations.id"))
+    manage_token: Mapped[str] = mapped_column(String(64))
 
 
 class Notification(Base):

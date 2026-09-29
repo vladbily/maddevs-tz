@@ -23,9 +23,11 @@ One organizer manages events and watches live attendance.
 - Preserve FIFO order, capacity limits, and one reminder per registration.
 
 ## Work journal
-- Log every user request in WORK_LOG.md before starting its implementation.
-- Include the request text or its explicitly labelled faithful summary.
-- Record each task's description, start, end, and result with ISO 8601 times.
+- Log every user prompt verbatim in WORK_LOG.md before implementing it; never replace it with a summary.
+- Include clarification replies and follow-up requests, each with a stable request ID.
+- Record when the prompt was logged; record receipt time only if actually available.
+- Log each meaningful assistant action with its request ID, actor, start, end, and result.
+- Read the clock at the start and end of actions; use ISO 8601 with a timezone.
 - Do not invent unknown timestamps; label retrospective entries clearly.
 - Never log passwords, tokens, or other secrets.
 - The primary agent owns the journal; subagents report their results to it.

@@ -1,7 +1,6 @@
 """Public participant routes and protected organizer endpoints."""
 
 import asyncio
-import secrets
 from collections.abc import AsyncIterator
 from typing import Annotated
 
@@ -11,7 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import services
-from app.auth import COOKIE_NAME, require_organizer, serializer
+from app.auth import (
+    COOKIE_NAME,
+    authenticate_organizer,
+    require_organizer,
+    require_same_origin,
+    serializer,
+)
 from app.config import settings
 from app.database import get_session, session_factory
 from app.models import Event, Registration
@@ -19,6 +24,7 @@ from app.schemas import (
     CheckinInput,
     EventInput,
     EventOut,
+    EventUpdate,
     LoginInput,
     ParticipantOut,
     RegistrationInput,
@@ -28,15 +34,19 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/api")
-organizer = APIRouter(prefix="/organizer", dependencies=[Depends(require_organizer)])
+organizer = APIRouter(
+    prefix="/organizer", dependencies=[Depends(require_same_origin), Depends(require_organizer)]
+)
 Session = Annotated[AsyncSession, Depends(get_session)]
 
 
-@router.post("/auth/login")
+@router.post("/auth/login", dependencies=[Depends(require_same_origin)])
 async def login(data: LoginInput, response: Response) -> dict[str, bool]:
     """Issue a signed organizer session after verifying the configured password."""
-    if not secrets.compare_digest(data.password.encode(), settings.organizer_password.encode()):
-        raise HTTPException(401, "Неверный пароль")
+    await authenticate_organizer(data.password)
+    response.delete_cookie(
+        COOKIE_NAME, path="/", httponly=True, secure=settings.cookie_secure, samesite="strict"
+    )
     response.set_cookie(
         COOKIE_NAME,
         serializer.dumps({"role": "organizer"}),
@@ -44,6 +54,7 @@ async def login(data: LoginInput, response: Response) -> dict[str, bool]:
         httponly=True,
         secure=settings.cookie_secure,
         samesite="strict",
+        path="/api",
     )
     return {"authenticated": True}
 
@@ -54,10 +65,13 @@ async def auth_session() -> dict[str, bool]:
     return {"authenticated": True}
 
 
-@router.post("/auth/logout")
+@router.post("/auth/logout", dependencies=[Depends(require_same_origin)])
 async def logout(response: Response) -> dict[str, bool]:
     """Remove the organizer cookie from the browser."""
-    response.delete_cookie(COOKIE_NAME, httponly=True, samesite="strict")
+    for path in ("/api", "/"):
+        response.delete_cookie(
+            COOKIE_NAME, path=path, httponly=True, secure=settings.cookie_secure, samesite="strict"
+        )
     return {"authenticated": False}
 
 
@@ -77,7 +91,7 @@ async def read_event(event_id: int, session: Session) -> EventOut:
 @router.post("/events/{event_id}/registrations", response_model=RegistrationResult)
 async def register(event_id: int, data: RegistrationInput, session: Session) -> RegistrationResult:
     """Register an email once and return a new management link when applicable."""
-    return await services.register(session, event_id, str(data.email).lower())
+    return await services.register(session, event_id, str(data.email).lower(), data.idempotency_key)
 
 
 @router.get("/tickets/{token}", response_model=TicketOut)
@@ -99,7 +113,7 @@ async def create_event(data: EventInput, session: Session) -> EventOut:
 
 
 @organizer.put("/events/{event_id}", response_model=EventOut)
-async def update_event(event_id: int, data: EventInput, session: Session) -> EventOut:
+async def update_event(event_id: int, data: EventUpdate, session: Session) -> EventOut:
     """Save event details and notify participants about schedule changes."""
     return await services.update_event(session, event_id, data)
 
@@ -125,7 +139,7 @@ async def stats(event_id: int, session: Session) -> Statistics:
 
 
 async def statistics_stream(request: Request, event_id: int) -> AsyncIterator[str]:
-    """Emit changed counters while releasing database sessions between checks."""
+    """Emit event snapshots on detail or participant changes using short sessions."""
     previous = ""
     idle_ticks = 0
     while not await request.is_disconnected():
@@ -135,8 +149,9 @@ async def statistics_stream(request: Request, event_id: int) -> AsyncIterator[st
             yield "event: expired\ndata: {}\n\n"
             return
         async with session_factory() as session:
-            counts = await services.statistics(session, event_id)
-        current = counts.model_dump_json()
+            event = await services.get_event(session, event_id)
+            snapshot = await services.event_out(session, event)
+        current = snapshot.model_dump_json()
         if current != previous:
             yield f"data: {current}\n\n"
             previous = current

@@ -18,8 +18,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://events:events@postgres:5432/events_test
       TEST_DATABASE_URL: postgresql+asyncpg://events:events@postgres:5432/events_test
-      ORGANIZER_PASSWORD: organizer-test
-      SESSION_SECRET: isolated-test-session-secret
+      ORGANIZER_PASSWORD: organizer-test-password
+      SESSION_SECRET: isolated-test-session-secret-not-for-production
       REMINDER_INTERVAL: 1
     depends_on:
       postgres:
@@ -31,7 +31,10 @@ services:
       retries: 30
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        PUBLIC_URL: http://frontend
     depends_on:
       backend:
         condition: service_healthy
@@ -46,8 +49,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.e2e
     environment:
-      BASE_URL: http://frontend
-      ORGANIZER_PASSWORD: organizer-test
+      BASE_URL: http://frontend:8081
+      PUBLIC_BASE_URL: http://frontend
+      ORGANIZER_PASSWORD: organizer-test-password
     depends_on:
       frontend:
         condition: service_healthy

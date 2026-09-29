@@ -1,23 +1,40 @@
 import type { ReactNode } from "react";
-import { Link, NavLink } from "react-router-dom";
-import type { Event, RegistrationStatus, Statistics } from "./api";
+import { Link, NavLink, useLocation } from "react-router-dom";
+import {
+  publicUrl,
+  type Event,
+  type RegistrationStatus,
+  type Statistics,
+} from "./api";
 
 /** Render the shared navigation and quiet footer. */
 export function Layout({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation();
+  const organizer = pathname === "/login" || pathname.startsWith("/organizer");
   return (
     <>
       <header className="site-header">
-        <Link className="brand" to="/" aria-label="Место — главная">
+        <a
+          className="brand"
+          href={organizer ? publicUrl("/") : "/"}
+          aria-label="Место — главная"
+        >
           <span className="brand-mark">м</span>место
           <span className="brand-dot">.</span>
-        </Link>
+        </a>
         <nav aria-label="Основная навигация">
-          <NavLink to="/" end>
-            События
-          </NavLink>
-          <NavLink className="organizer-link" to="/organizer">
-            Организатору <span aria-hidden="true">↗</span>
-          </NavLink>
+          {organizer ? (
+            <a href={publicUrl("/")}>События</a>
+          ) : (
+            <NavLink to="/" end>
+              События
+            </NavLink>
+          )}
+          {organizer && (
+            <NavLink className="organizer-link" to="/organizer">
+              Кабинет <span aria-hidden="true">↗</span>
+            </NavLink>
+          )}
         </nav>
       </header>
       <main className="page">{children}</main>

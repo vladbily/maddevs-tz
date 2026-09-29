@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -29,6 +30,12 @@ class EventInput(BaseModel):
         return value.astimezone(UTC)
 
 
+class EventUpdate(EventInput):
+    """Require the version read by an editor before replacing event details."""
+
+    revision: int = Field(ge=1, strict=True)
+
+
 class Statistics(BaseModel):
     """Live totals calculated from registration rows."""
 
@@ -42,12 +49,14 @@ class EventOut(EventInput, Statistics):
 
     id: int
     revision: int
+    participants_revision: int
 
 
 class RegistrationInput(BaseModel):
     """An email address used to reserve one place."""
 
     email: EmailStr = Field(max_length=254)
+    idempotency_key: UUID | None = None
 
     @field_validator("email", mode="before")
     @classmethod
@@ -57,7 +66,7 @@ class RegistrationInput(BaseModel):
 
 
 class RegistrationResult(BaseModel):
-    """Return a management link only when creating an active registration."""
+    """Return a management link for a new registration or an authenticated retry."""
 
     status: RegistrationStatus
     created: bool

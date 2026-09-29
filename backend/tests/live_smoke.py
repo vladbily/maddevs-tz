@@ -7,8 +7,9 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
+from app.auth import MAX_LOGIN_FAILURES
 from app.config import settings
 from app.database import engine, session_factory
 from app.models import Notification
@@ -42,9 +43,17 @@ async def main() -> None:
     try:
         if "--after-restart" in sys.argv:
             assert await reminder_count() == 1, "Restart duplicated or lost the reminder"
+            async with AsyncClient(base_url="http://frontend:8081", timeout=10) as client:
+                response = await client.post(
+                    "/api/auth/login", json={"password": settings.organizer_password}
+                )
+                assert response.status_code == 429, "Restart reset the login throttle"
+            async with session_factory() as session, session.begin():
+                await session.execute(text("DELETE FROM organizer_login"))
             print("Reminder survives backend restart without duplication: PASS")
+            print("Organizer lockout survives backend restart: PASS")
             return
-        async with AsyncClient(base_url="http://frontend", timeout=10) as client:
+        async with AsyncClient(base_url="http://frontend:8081", timeout=10) as client:
             response = await client.post(
                 "/api/auth/login", json={"password": settings.organizer_password}
             )
@@ -75,7 +84,13 @@ async def main() -> None:
                 assert stream.status_code == 200
                 lines = stream.aiter_lines()
                 first = await next_snapshot(lines)
-                assert first == {"confirmed": 1, "waitlisted": 0, "checked_in": 0}
+                assert first["id"] == event_id
+                assert first["capacity"] == 1
+                assert {key: first[key] for key in ("confirmed", "waitlisted", "checked_in")} == {
+                    "confirmed": 1,
+                    "waitlisted": 0,
+                    "checked_in": 0,
+                }
                 response = await client.post(
                     f"/api/organizer/events/{event_id}/checkin", json={"code": code}
                 )
@@ -85,6 +100,9 @@ async def main() -> None:
             async with client.stream("GET", f"/api/organizer/events/{event_id}/stream") as stream:
                 assert (await next_snapshot(stream.aiter_lines()))["checked_in"] == 1
             print("Real reminder worker, SSE through Nginx, and reconnect: PASS")
+            for _ in range(MAX_LOGIN_FAILURES):
+                response = await client.post("/api/auth/login", json={"password": "incorrect"})
+            assert response.status_code == 429
     finally:
         await engine.dispose()
 

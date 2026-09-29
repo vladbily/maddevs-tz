@@ -22,12 +22,18 @@ async def clean_database() -> AsyncIterator[None]:
     """Clear only the explicitly configured test database around every test."""
     async with session_factory() as session, session.begin():
         await session.execute(
-            text("TRUNCATE notifications, registrations, events RESTART IDENTITY")
+            text(
+                "TRUNCATE organizer_login, notifications, registration_requests, "
+                "registrations, events RESTART IDENTITY"
+            )
         )
     yield
     async with session_factory() as session, session.begin():
         await session.execute(
-            text("TRUNCATE notifications, registrations, events RESTART IDENTITY")
+            text(
+                "TRUNCATE organizer_login, notifications, registration_requests, "
+                "registrations, events RESTART IDENTITY"
+            )
         )
     await engine.dispose()
 

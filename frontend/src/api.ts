@@ -1,3 +1,11 @@
+/** Build participant links using the public site even inside the private cabinet. */
+export function publicUrl(path: string): string {
+  return new URL(
+    path,
+    import.meta.env.VITE_PUBLIC_URL ?? "http://localhost:8080",
+  ).href;
+}
+
 export interface Statistics {
   confirmed: number;
   waitlisted: number;
@@ -11,6 +19,7 @@ export interface Event extends Statistics {
   starts_at: string;
   capacity: number;
   revision: number;
+  participants_revision: number;
 }
 
 export type RegistrationStatus = "confirmed" | "waitlisted" | "cancelled";
@@ -49,17 +58,35 @@ export async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...options.headers },
-  });
-  const body = await response.json();
+  let response: Response;
+  try {
+    response = await fetch(`/api${path}`, {
+      ...options,
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...options.headers },
+    });
+  } catch {
+    throw new ApiError(
+      "Не удалось связаться с сервером. Проверьте соединение и повторите попытку.",
+      0,
+    );
+  }
+  const unavailable = "Сервис временно недоступен. Попробуйте ещё раз.";
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new ApiError(unavailable, response.ok ? 503 : response.status);
+  }
   if (!response.ok) {
     const message =
-      typeof body.detail === "string"
-        ? body.detail
-        : "Проверьте заполненные поля: email, дату и количество мест.";
+      response.status >= 500
+        ? unavailable
+        : typeof body?.detail === "string"
+          ? body.detail
+          : response.status === 422
+            ? "Проверьте заполненные поля: email, дату и количество мест."
+            : "Не удалось выполнить запрос. Попробуйте ещё раз.";
     throw new ApiError(message, response.status);
   }
   return body as T;
