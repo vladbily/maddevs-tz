@@ -165,22 +165,26 @@ async def test_checkin_once_and_no_cancellation(organizer: AsyncClient) -> None:
     assert stats["checked_in"] == 1
 
 
-@pytest.mark.parametrize("seconds,expected", [(86401, 0), (86400, 1), (1, 1), (0, 0)])
+@pytest.mark.parametrize("seconds,expected", [(86401, 0), (86400, 2), (1, 2), (0, 0)])
 async def test_reminder_boundary(organizer: AsyncClient, seconds: int, expected: int) -> None:
-    """Create reminders exactly inside the open-start and inclusive-24-hour window."""
+    """Remind confirmed and waiting participants once within 24 hours, excluding cancellations."""
     event = await create_event(organizer)
     await register(organizer, event["id"], "a@example.com")
     await register(organizer, event["id"], "waiting@example.com")
+    cancelled = await register(organizer, event["id"], "cancelled@example.com")
+    assert (await organizer.post(f"/api{cancelled['manage_url']}/cancel")).status_code == 200
     now = datetime.fromisoformat(event["starts_at"]) - timedelta(seconds=seconds)
     await run_reminders(now=now)
     await run_reminders(now=now)
     messages = await notifications("reminder")
     assert len(messages) == expected
-    assert all(message.email == "a@example.com" for message in messages)
+    expected_emails = ["a@example.com", "waiting@example.com"] if expected else []
+    assert sorted(message.email for message in messages) == expected_emails
+    assert all(message.created_at == now for message in messages)
 
 
-async def test_reminder_reschedule_and_late_promotion(organizer: AsyncClient) -> None:
-    """Moving dates defers unsent reminders and never duplicates an existing one."""
+async def test_reminder_reschedule_promotion_and_late_registration(organizer: AsyncClient) -> None:
+    """Remind each active participant once across reschedules, promotions, and late signups."""
     event = await create_event(organizer, hours=12)
     a = await register(organizer, event["id"], "a@example.com")
     await register(organizer, event["id"], "b@example.com")
@@ -195,15 +199,27 @@ async def test_reminder_reschedule_and_late_promotion(organizer: AsyncClient) ->
     assert response.status_code == 200
     event = response.json()
     await run_reminders()
-    assert len(await notifications("reminder")) == 1
-    await organizer.post(f"/api{a['manage_url']}/cancel")
+    messages = await notifications("reminder")
+    assert sorted(message.email for message in messages) == ["a@example.com", "b@example.com"]
+    waiting_message = next(message for message in messages if message.email == "b@example.com")
+    assert waiting_message.code is None
+    assert waiting_message.payload["status"] == "waitlisted"
+    assert (await organizer.post(f"/api{a['manage_url']}/cancel")).status_code == 200
     await run_reminders()
     assert len(await notifications("reminder")) == 2
+    late = await register(organizer, event["id"], "late@example.com")
+    assert late["status"] == "waitlisted"
+    await run_reminders()
+    assert sorted(message.email for message in await notifications("reminder")) == [
+        "a@example.com",
+        "b@example.com",
+        "late@example.com",
+    ]
     event["starts_at"] = (datetime.now(UTC) + timedelta(hours=20)).isoformat()
     response = await organizer.put(f"/api/organizer/events/{event['id']}", json=event)
     assert response.status_code == 200
     await run_reminders()
-    assert len(await notifications("reminder")) == 2
+    assert len(await notifications("reminder")) == 3
 
 
 async def test_reminder_pass_skips_existing_messages(

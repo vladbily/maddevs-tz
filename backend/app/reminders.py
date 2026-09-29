@@ -41,7 +41,7 @@ async def run_reminders(
             participants = await session.scalars(
                 select(Registration).where(
                     Registration.event_id == event_id,
-                    Registration.status == "confirmed",
+                    Registration.status.in_(("confirmed", "waitlisted")),
                     ~select(Notification.id)
                     .where(
                         Notification.registration_id == Registration.id,
